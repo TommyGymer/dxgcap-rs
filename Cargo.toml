@@ -1,6 +1,6 @@
 [package]
 name = "dxgcap2"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["jojo <jo@jo.zone>", "TommyGymer <github@tgymer.uk>"]
 description = "Screen capturing with DXGI for Windows in Rust"
 repository = "https://github.com/TommyGymer/dxgcap-rs"
@@ -11,7 +11,7 @@ license = "AGPL-3.0"
 edition = "2018"
 
 [dependencies]
-winapi = { version = "0.3.8", features = ["d3d11", "d3dcommon", "dxgi", "dxgi1_2", "dxgitype", "ntdef", "unknwnbase", "windef", "winerror", "winuser"] }
+winapi = { version = "0.3.9", features = ["d3d11", "d3dcommon", "dxgi", "dxgi1_2", "dxgitype", "ntdef", "unknwnbase", "windef", "winerror", "winuser"] }
 wio = "0.2.2"
 
 # TODO: optional
