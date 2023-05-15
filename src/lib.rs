@@ -128,11 +128,11 @@ fn get_capture_source(
     if cs_index == 0 {
         output_dups
             .into_iter()
-            .find(|&(_, ref out)| output_is_primary(out))
+            .find(|(_, out)| output_is_primary(out))
     } else {
         output_dups
             .into_iter()
-            .filter(|&(_, ref out)| !output_is_primary(out))
+            .filter(|(_, out)| !output_is_primary(out))
             .nth(cs_index - 1)
     }
 }
@@ -308,7 +308,7 @@ impl DXGIManager {
             .take_while(Option::is_some)
             .map(Option::unwrap)
             .map(|adapter| (get_adapter_outputs(&adapter), adapter))
-            .filter(|&(ref outs, _)| !outs.is_empty())
+            .filter(|(outs, _)| !outs.is_empty())
         {
             // Creating device for each adapter that has the output
             let (d3d11_device, device_context) = d3d11_create_device(adapter.up().as_raw());
@@ -391,7 +391,10 @@ impl DXGIManager {
             } = output_desc.DesktopCoordinates;
             ((right - left) as usize, (bottom - top) as usize)
         };
-        println!("output_width: {}, output_height: {}", output_width, output_height);
+        println!(
+            "output_width: {}, output_height: {}",
+            output_width, output_height
+        );
         println!("{:?} {:?}", output_desc.Rotation, output_desc.Monitor);
         let stride = mapped_surface.Pitch as usize / mem::size_of::<BGRA8>();
         println!("stride: {}", stride);
@@ -406,99 +409,103 @@ impl DXGIManager {
             slice::from_raw_parts(mapped_surface.pBits as *const T, byte_stride * scan_lines)
         };
 
-        let pixel_buf = match output_desc.Rotation {
-            DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => unsafe {
-                let size = byte_size(output_width * output_height);
-                let mut pixel_buf = Vec::with_capacity(size);
-                let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
-                mapped_pixels
-                    .par_chunks(byte_stride)
-                    .enumerate()
-                    .for_each(|(scan_line, chunk)| {
-                        let mut src = chunk.as_ptr() as *const BGRA8;
-                        let mut dst = ptr.0 as *mut BGRA8;
-                        dst = dst.add(scan_line * output_width);
-                        let stop = src.add(output_width);
-                        // src = src.add(output_width);
-                        while src != stop {
-                            src = src.add(1);
-                            dst.write(*src);
-                            dst = dst.add(1);
-                        }
-                    });
-                pixel_buf.set_len(size);
-                pixel_buf
-            },
-            DXGI_MODE_ROTATION_ROTATE90 => unsafe {
-                let size = byte_size(output_width * output_height);
-                let mut pixel_buf = Vec::with_capacity(size);
-                let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
-                mapped_pixels
-                    .par_chunks(byte_stride)
-                    .rev()
-                    .enumerate()
-                    .for_each(|(column, chunk)| {
-                        let mut src = chunk.as_ptr() as *const BGRA8;
-                        let mut dst = ptr.0 as *mut BGRA8;
-                        dst = dst.add(column);
-                        let stop = src.add(output_height);
-                        while src != stop {
-                            dst.write(*src);
-                            src = src.add(1);
-                            dst = dst.add(output_width);
-                        }
-                    });
-                pixel_buf.set_len(size);
-                pixel_buf
-            },
-            DXGI_MODE_ROTATION_ROTATE180 => unsafe {
-                let size = byte_size(output_width * output_height);
-                let mut pixel_buf = Vec::with_capacity(size);
-                let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
-                mapped_pixels
-                    .par_chunks(byte_stride)
-                    .rev()
-                    .enumerate()
-                    .for_each(|(scan_line, chunk)| {
-                        let mut src = chunk.as_ptr() as *const BGRA8;
-                        let mut dst = ptr.0 as *mut BGRA8;
-                        dst = dst.add(scan_line * output_width);
-                        let stop = src;
-                        src = src.add(output_width);
-                        while src != stop {
-                            src = src.sub(1);
-                            dst.write(*src);
-                            dst = dst.add(1);
-                        }
-                    });
-                pixel_buf.set_len(size);
-                pixel_buf
-            },
-            DXGI_MODE_ROTATION_ROTATE270 => unsafe {
-                let size = byte_size(output_width * output_height);
-                let mut pixel_buf = Vec::with_capacity(size);
-                let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
-                mapped_pixels
-                    .par_chunks(byte_stride)
-                    .enumerate()
-                    .for_each(|(column, chunk)| {
-                        let mut src = chunk.as_ptr() as *const BGRA8;
-                        let mut dst = ptr.0 as *mut BGRA8;
-                        dst = dst.add(column);
-                        let stop = src;
-                        src = src.add(output_height);
-                        while src != stop {
-                            src = src.sub(1);
-                            dst.write(*src);
-                            dst = dst.add(output_width);
-                        }
-                    });
-                pixel_buf.set_len(size);
-                pixel_buf
-            },
-            n => unreachable!("Undefined DXGI_MODE_ROTATION: {}", n),
-        };
-        println!("pixel_buf.cap: {} ; pixel_buf.len: {} ; expected {}", pixel_buf.capacity(), pixel_buf.len(), output_width * output_height * (mem::size_of::<BGRA8>() / mem::size_of::<T>()));
+        let pixel_buf =
+            match output_desc.Rotation {
+                DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => unsafe {
+                    let size = byte_size(output_width * output_height);
+                    let mut pixel_buf = Vec::with_capacity(size);
+                    let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
+                    mapped_pixels.par_chunks(byte_stride).enumerate().for_each(
+                        |(scan_line, chunk)| {
+                            let mut src = chunk.as_ptr() as *const BGRA8;
+                            let mut dst = ptr.0 as *mut BGRA8;
+                            dst = dst.add(scan_line * output_width);
+                            let stop = src.add(output_width);
+                            // src = src.add(output_width);
+                            while src != stop {
+                                src = src.add(1);
+                                dst.write(*src);
+                                dst = dst.add(1);
+                            }
+                        },
+                    );
+                    pixel_buf.set_len(size);
+                    pixel_buf
+                },
+                DXGI_MODE_ROTATION_ROTATE90 => unsafe {
+                    let size = byte_size(output_width * output_height);
+                    let mut pixel_buf = Vec::with_capacity(size);
+                    let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
+                    mapped_pixels
+                        .par_chunks(byte_stride)
+                        .rev()
+                        .enumerate()
+                        .for_each(|(column, chunk)| {
+                            let mut src = chunk.as_ptr() as *const BGRA8;
+                            let mut dst = ptr.0 as *mut BGRA8;
+                            dst = dst.add(column);
+                            let stop = src.add(output_height);
+                            while src != stop {
+                                dst.write(*src);
+                                src = src.add(1);
+                                dst = dst.add(output_width);
+                            }
+                        });
+                    pixel_buf.set_len(size);
+                    pixel_buf
+                },
+                DXGI_MODE_ROTATION_ROTATE180 => unsafe {
+                    let size = byte_size(output_width * output_height);
+                    let mut pixel_buf = Vec::with_capacity(size);
+                    let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
+                    mapped_pixels
+                        .par_chunks(byte_stride)
+                        .rev()
+                        .enumerate()
+                        .for_each(|(scan_line, chunk)| {
+                            let mut src = chunk.as_ptr() as *const BGRA8;
+                            let mut dst = ptr.0 as *mut BGRA8;
+                            dst = dst.add(scan_line * output_width);
+                            let stop = src;
+                            src = src.add(output_width);
+                            while src != stop {
+                                src = src.sub(1);
+                                dst.write(*src);
+                                dst = dst.add(1);
+                            }
+                        });
+                    pixel_buf.set_len(size);
+                    pixel_buf
+                },
+                DXGI_MODE_ROTATION_ROTATE270 => unsafe {
+                    let size = byte_size(output_width * output_height);
+                    let mut pixel_buf = Vec::with_capacity(size);
+                    let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
+                    mapped_pixels.par_chunks(byte_stride).enumerate().for_each(
+                        |(column, chunk)| {
+                            let mut src = chunk.as_ptr() as *const BGRA8;
+                            let mut dst = ptr.0 as *mut BGRA8;
+                            dst = dst.add(column);
+                            let stop = src;
+                            src = src.add(output_height);
+                            while src != stop {
+                                src = src.sub(1);
+                                dst.write(*src);
+                                dst = dst.add(output_width);
+                            }
+                        },
+                    );
+                    pixel_buf.set_len(size);
+                    pixel_buf
+                },
+                n => unreachable!("Undefined DXGI_MODE_ROTATION: {}", n),
+            };
+        println!(
+            "pixel_buf.cap: {} ; pixel_buf.len: {} ; expected {}",
+            pixel_buf.capacity(),
+            pixel_buf.len(),
+            output_width * output_height * (mem::size_of::<BGRA8>() / mem::size_of::<T>())
+        );
         unsafe { frame_surface.Unmap() };
         Ok((pixel_buf, (output_width, output_height)))
     }
