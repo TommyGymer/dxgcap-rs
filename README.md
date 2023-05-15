@@ -7,7 +7,7 @@ Screen capturing for Windows using the DXGI Desktop Duplication API.
 [![Crate](https://img.shields.io/crates/v/dxgcap2.svg)](https://crates.io/crates/dxgcap2/)
 [![Rust](https://github.com/TommyGymer/dxgcap-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/TommyGymer/dxgcap-rs/actions/workflows/rust.yml)
 
-[Documentation](https://docs.rs/dxgcap/*/x86_64-pc-windows-msvc/dxgcap/)
+[Documentation](https://docs.rs/dxgcap2/latest/dxgcap2/)
 
 ## License
 
