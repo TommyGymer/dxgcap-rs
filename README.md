@@ -5,6 +5,7 @@ This is an updated fork of [dxgcap-rs by ko1N](https://github.com/ko1N/dxgcap-rs
 Screen capturing for Windows using the DXGI Desktop Duplication API.
 
 [![Crate](https://img.shields.io/crates/v/dxgcap2.svg)](https://crates.io/crates/dxgcap2/)
+[![Rust](https://github.com/TommyGymer/dxgcap-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/TommyGymer/dxgcap-rs/actions/workflows/rust.yml)
 
 [Documentation](https://docs.rs/dxgcap/*/x86_64-pc-windows-msvc/dxgcap/)
 
