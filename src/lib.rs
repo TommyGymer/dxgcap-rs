@@ -391,13 +391,13 @@ impl DXGIManager {
             } = output_desc.DesktopCoordinates;
             ((right - left) as usize, (bottom - top) as usize)
         };
-        println!(
-            "output_width: {}, output_height: {}",
-            output_width, output_height
-        );
-        println!("{:?} {:?}", output_desc.Rotation, output_desc.Monitor);
+        // println!(
+        //     "output_width: {}, output_height: {}",
+        //     output_width, output_height
+        // );
+        // println!("{:?} {:?}", output_desc.Rotation, output_desc.Monitor);
         let stride = mapped_surface.Pitch as usize / mem::size_of::<BGRA8>();
-        println!("stride: {}", stride);
+        // println!("stride: {}", stride);
         let byte_stride = byte_size(stride);
 
         let scan_lines = match output_desc.Rotation {
@@ -500,12 +500,12 @@ impl DXGIManager {
                 },
                 n => unreachable!("Undefined DXGI_MODE_ROTATION: {}", n),
             };
-        println!(
-            "pixel_buf.cap: {} ; pixel_buf.len: {} ; expected {}",
-            pixel_buf.capacity(),
-            pixel_buf.len(),
-            output_width * output_height * (mem::size_of::<BGRA8>() / mem::size_of::<T>())
-        );
+        // println!(
+        //     "pixel_buf.cap: {} ; pixel_buf.len: {} ; expected {}",
+        //     pixel_buf.capacity(),
+        //     pixel_buf.len(),
+        //     output_width * output_height * (mem::size_of::<BGRA8>() / mem::size_of::<T>())
+        // );
         unsafe { frame_surface.Unmap() };
         Ok((pixel_buf, (output_width, output_height)))
     }
