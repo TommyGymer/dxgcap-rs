@@ -371,6 +371,7 @@ impl DXGIManager {
             Ok(surface) => surface,
             Err(e) => return Err(e),
         };
+        // println!("{}", frame_surface.)
         let mapped_surface = unsafe {
             let mut mapped_surface = zeroed();
             if hr_failed(frame_surface.Map(&mut mapped_surface, DXGI_MAP_READ)) {
@@ -381,8 +382,6 @@ impl DXGIManager {
         };
         let byte_size = |x| x * mem::size_of::<BGRA8>() / mem::size_of::<T>();
         let output_desc = self.duplicated_output.as_mut().unwrap().get_desc();
-        let stride = mapped_surface.Pitch as usize / mem::size_of::<BGRA8>();
-        let byte_stride = byte_size(stride);
         let (output_width, output_height) = {
             let RECT {
                 left,
@@ -392,6 +391,11 @@ impl DXGIManager {
             } = output_desc.DesktopCoordinates;
             ((right - left) as usize, (bottom - top) as usize)
         };
+        println!("output_width: {}, output_height: {}", output_width, output_height);
+        println!("{:?} {:?}", output_desc.Rotation, output_desc.Monitor);
+        let stride = mapped_surface.Pitch as usize / mem::size_of::<BGRA8>();
+        println!("stride: {}", stride);
+        let byte_stride = byte_size(stride);
 
         let scan_lines = match output_desc.Rotation {
             DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270 => output_width,
@@ -403,9 +407,31 @@ impl DXGIManager {
         };
 
         let pixel_buf = match output_desc.Rotation {
-            DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => mapped_pixels.to_vec(),
+            DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => unsafe {
+                let size = byte_size(output_width * output_height);
+                let mut pixel_buf = Vec::with_capacity(size);
+                let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
+                mapped_pixels
+                    .par_chunks(byte_stride)
+                    .enumerate()
+                    .for_each(|(scan_line, chunk)| {
+                        let mut src = chunk.as_ptr() as *const BGRA8;
+                        let mut dst = ptr.0 as *mut BGRA8;
+                        dst = dst.add(scan_line * output_width);
+                        let stop = src.add(output_width);
+                        // src = src.add(output_width);
+                        while src != stop {
+                            src = src.add(1);
+                            dst.write(*src);
+                            dst = dst.add(1);
+                        }
+                    });
+                pixel_buf.set_len(size);
+                pixel_buf
+            },
             DXGI_MODE_ROTATION_ROTATE90 => unsafe {
-                let mut pixel_buf = Vec::with_capacity(byte_size(output_width * output_height));
+                let size = byte_size(output_width * output_height);
+                let mut pixel_buf = Vec::with_capacity(size);
                 let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
                 mapped_pixels
                     .par_chunks(byte_stride)
@@ -422,11 +448,12 @@ impl DXGIManager {
                             dst = dst.add(output_width);
                         }
                     });
-                pixel_buf.set_len(pixel_buf.capacity());
+                pixel_buf.set_len(size);
                 pixel_buf
             },
             DXGI_MODE_ROTATION_ROTATE180 => unsafe {
-                let mut pixel_buf = Vec::with_capacity(byte_size(output_width * output_height));
+                let size = byte_size(output_width * output_height);
+                let mut pixel_buf = Vec::with_capacity(size);
                 let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
                 mapped_pixels
                     .par_chunks(byte_stride)
@@ -444,11 +471,12 @@ impl DXGIManager {
                             dst = dst.add(1);
                         }
                     });
-                pixel_buf.set_len(pixel_buf.capacity());
+                pixel_buf.set_len(size);
                 pixel_buf
             },
             DXGI_MODE_ROTATION_ROTATE270 => unsafe {
-                let mut pixel_buf = Vec::with_capacity(byte_size(output_width * output_height));
+                let size = byte_size(output_width * output_height);
+                let mut pixel_buf = Vec::with_capacity(size);
                 let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
                 mapped_pixels
                     .par_chunks(byte_stride)
@@ -465,11 +493,12 @@ impl DXGIManager {
                             dst = dst.add(output_width);
                         }
                     });
-                pixel_buf.set_len(pixel_buf.capacity());
+                pixel_buf.set_len(size);
                 pixel_buf
             },
             n => unreachable!("Undefined DXGI_MODE_ROTATION: {}", n),
         };
+        println!("pixel_buf.cap: {} ; pixel_buf.len: {} ; expected {}", pixel_buf.capacity(), pixel_buf.len(), output_width * output_height * (mem::size_of::<BGRA8>() / mem::size_of::<T>()));
         unsafe { frame_surface.Unmap() };
         Ok((pixel_buf, (output_width, output_height)))
     }
@@ -513,29 +542,40 @@ impl DXGIManager {
     }
 }
 
-#[test]
-fn test() {
-    let mut manager = DXGIManager::new(300).unwrap();
-    for _ in 0..100 {
-        match manager.capture_frame() {
-            Ok((pixels, (_, _))) => {
-                let len = pixels.len() as u64;
-                let (r, g, b) = pixels.into_iter().fold((0u64, 0u64, 0u64), |(r, g, b), p| {
-                    (r + p.r as u64, g + p.g as u64, b + p.b as u64)
-                });
-                println!("avg: {} {} {}", r / len, g / len, b / len)
+#[cfg(test)]
+mod dxgcap_tests {
+    use serial_test::serial;
+
+    use super::*;
+
+    #[test]
+    #[serial]
+    fn cap_100_frames() {
+        let mut manager = DXGIManager::new(300).unwrap();
+        for _ in 0..10 {
+            match manager.capture_frame() {
+                Ok((pixels, (_, _))) => {
+                    let len = pixels.len() as u64;
+                    let (r, g, b) = pixels.into_iter().fold((0u64, 0u64, 0u64), |(r, g, b), p| {
+                        (r + p.r as u64, g + p.g as u64, b + p.b as u64)
+                    });
+                    println!("avg: {} {} {}", r / len, g / len, b / len);
+                    println!("")
+                }
+                Err(e) => println!("error: {:?}", e),
             }
-            Err(e) => println!("error: {:?}", e),
         }
     }
-}
 
-#[test]
-fn compare_frame_dims() {
-    let mut manager = DXGIManager::new(300).unwrap();
-    let (frame, (fw, fh)) = manager.capture_frame().unwrap();
-    let (frame_u8, (fu8w, fu8h)) = manager.capture_frame_components().unwrap();
-    assert_eq!(fw, fu8w);
-    assert_eq!(fh, fu8h);
-    assert_eq!(4 * frame.len(), frame_u8.len());
+    #[test]
+    #[serial]
+    fn compare_frame_dims() {
+        let mut manager = DXGIManager::new(300).unwrap();
+        let (frame, (fw, fh)) = manager.capture_frame().unwrap();
+        let (frame_u8, (fu8w, fu8h)) = manager.capture_frame_components().unwrap();
+        assert_eq!(fw, fu8w);
+        assert_eq!(fh, fu8h);
+        assert_eq!(4 * frame.len(), frame_u8.len());
+        assert_eq!(fw * fh, frame.len());
+    }
 }

@@ -1,9 +1,9 @@
 [package]
-name = "dxgcap"
-version = "0.2.4"
-authors = ["jojo <jo@jo.zone>"]
+name = "dxgcap2"
+version = "0.1.0"
+authors = ["TommyGymer <github@tgymer.uk>"]
 description = "Screen capturing with DXGI for Windows in Rust"
-repository = "https://github.com/bryal/dxgcap-rs"
+repository = "https://github.com/TommyGymer/dxgcap-rs"
 documentation = "https://docs.rs/dxgcap/*/x86_64-pc-windows-msvc/dxgcap/"
 readme = "README.md"
 keywords = ["Windows", "DXGI", "screen", "record", "capture"]
@@ -16,3 +16,6 @@ wio = "0.2.2"
 
 # TODO: optional
 rayon = "1.6"
+
+[dev-dependencies]
+serial_test = "2.0.0"
