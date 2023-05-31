@@ -18,6 +18,12 @@ impl From<RGBA8> for BGRA8 {
     }
 }
 
+impl<'a> Into<&'a[u8]> for &'a BGRA8 {
+    fn into(self) -> &'a [u8] {
+        unsafe { any_as_u8_slice(self) }
+    }
+}
+
 /// Color represented by additive channels: Red (r), Green (g), Blue (b), and Alpha (a).
 #[derive(Copy, Clone, Debug, PartialOrd, PartialEq, Eq, Ord)]
 pub struct RGBA8 {
@@ -36,4 +42,11 @@ impl From<BGRA8> for RGBA8 {
             a: px.a,
         }
     }
+}
+
+unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
+    ::core::slice::from_raw_parts(
+        (p as *const T) as *const u8,
+        ::core::mem::size_of::<T>(),
+    )
 }

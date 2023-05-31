@@ -236,6 +236,32 @@ impl DuplicatedOutput {
     }
 }
 
+pub struct BorrowedFrame<'a> {
+    surface: ComPtr<IDXGISurface1>,
+    pub width: usize,
+    pub height: usize,
+    data: &'a [BGRA8],
+}
+
+impl<'a> Drop for BorrowedFrame<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            self.surface.Unmap();
+        }
+    }
+}
+
+impl<'a> BorrowedFrame<'a> {
+    pub fn data(&'a self) -> &'a [BGRA8] {
+        self.data
+    }
+    pub fn as_bytes(&'a self) -> &'a [u8] {
+        unsafe {
+            ::core::slice::from_raw_parts((self.data as *const [BGRA8]) as *const u8, self.width * 4 * self.height)
+        }
+    }
+}
+
 /// Manager of DXGI duplicated outputs
 pub struct DXGIManager {
     duplicated_output: Option<DuplicatedOutput>,
@@ -362,6 +388,51 @@ impl DXGIManager {
                 }
             }
         }
+    }
+
+    fn borrow_frame_cpu_t<'a>(&'a mut self) -> Result<BorrowedFrame<'a>, CaptureError> {
+        let frame_surface = match self.capture_frame_to_surface() {
+            Ok(surface) => surface,
+            Err(e) => return Err(e),
+        };
+
+        let mapped_surface = unsafe {
+            let mut mapped_surface = zeroed();
+            if hr_failed(frame_surface.Map(&mut mapped_surface, DXGI_MAP_READ)) {
+                frame_surface.Release();
+                return Err(CaptureError::Fail("Failed to map surface"));
+            }
+            mapped_surface
+        };
+
+        let output_desc = self.duplicated_output.as_mut().unwrap().get_desc();
+        let (output_width, output_height) = {
+            let RECT {
+                left,
+                top,
+                right,
+                bottom,
+            } = output_desc.DesktopCoordinates;
+            ((right - left) as usize, (bottom - top) as usize)
+        };
+
+        let scan_lines = match output_desc.Rotation {
+            DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270 => output_width,
+            _ => output_height,
+        };
+
+        let stride = mapped_surface.Pitch as usize / mem::size_of::<BGRA8>();
+
+        let frame = BorrowedFrame {
+            surface: frame_surface,
+            width: output_width,
+            height: output_height,
+            data: unsafe {
+                slice::from_raw_parts(mapped_surface.pBits as *const BGRA8, stride * scan_lines)
+            },
+        };
+
+        Ok(frame)
     }
 
     fn capture_frame_t<T: Copy + Send + Sync + Sized>(
@@ -534,6 +605,11 @@ impl DXGIManager {
         });
         let frame = unsafe { ::std::mem::transmute(frame) };
         Ok((frame, size))
+    }
+
+    /// Borrow a frame without allocations
+    pub fn borrow_frame(&mut self) -> Result<BorrowedFrame, CaptureError> {
+        self.borrow_frame_cpu_t()
     }
 
     // TODO: replace with gpu implementation
