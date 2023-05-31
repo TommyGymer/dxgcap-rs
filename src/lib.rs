@@ -187,14 +187,25 @@ impl DuplicatedOutput {
         &mut self,
         timeout_ms: u32,
     ) -> Result<ComPtr<IDXGISurface1>, HRESULT> {
+        let safe_timeout_ms = match timeout_ms {0 => 1000, _ => timeout_ms};
         let frame_resource = unsafe {
             let mut frame_resource = ptr::null_mut();
             let mut frame_info = zeroed();
-            let hr = self.output_duplication.AcquireNextFrame(
-                timeout_ms,
+            let mut hr = self.output_duplication.AcquireNextFrame(
+                safe_timeout_ms,
                 &mut frame_info,
                 &mut frame_resource,
             );
+
+            // Allows infinite blocking if timeout is 0
+            while hr == DXGI_ERROR_WAIT_TIMEOUT && timeout_ms == 0 {
+                hr = self.output_duplication.AcquireNextFrame(
+                    safe_timeout_ms,
+                    &mut frame_info,
+                    &mut frame_resource,
+                );
+            }
+
             if hr_failed(hr) {
                 return Err(hr);
             }
@@ -276,7 +287,8 @@ unsafe impl<T> Send for SharedPtr<T> {}
 unsafe impl<T> Sync for SharedPtr<T> {}
 
 impl DXGIManager {
-    /// Construct a new manager with capture timeout
+    /// Construct a new manager with capture timeout.
+    /// If `timeout_ms` is set to 0, capture will block indefinitely until a new frame is acquired.
     pub fn new(timeout_ms: u32) -> Result<DXGIManager, &'static str> {
         let mut manager = DXGIManager {
             duplicated_output: None,
@@ -312,6 +324,7 @@ impl DXGIManager {
     }
 
     /// Set timeout to use when capturing
+    /// If `timeout_ms` is set to 0, capture will block indefinitely until a new frame is acquired.
     pub fn set_timeout_ms(&mut self, timeout_ms: u32) {
         self.timeout_ms = timeout_ms
     }
