@@ -4,6 +4,8 @@
 
 pub mod pixfmt;
 pub use pixfmt::{BGRA8, RGBA8};
+use winapi::ctypes::c_void;
+use winapi::shared::minwindef::UINT;
 
 extern crate winapi;
 extern crate wio;
@@ -17,7 +19,9 @@ use winapi::shared::dxgi::{
     CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGISurface1,
     IID_IDXGIFactory1, DXGI_MAP_READ, DXGI_OUTPUT_DESC, DXGI_RESOURCE_PRIORITY_MAXIMUM,
 };
-use winapi::shared::dxgi1_2::{IDXGIOutput1, IDXGIOutputDuplication};
+use winapi::shared::dxgi1_2::{
+    IDXGIOutput1, IDXGIOutputDuplication, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+};
 use winapi::shared::dxgitype::*;
 // use winapi::shared::ntdef::*;
 use winapi::shared::windef::*;
@@ -168,6 +172,39 @@ fn duplicate_outputs(
     Ok((device, out_dups))
 }
 
+#[derive(Debug)]
+pub enum CursorType {
+    Monochrome = 1,
+    Color = 2,
+    MaskedColor = 4,
+}
+
+impl From<u32> for CursorType {
+    fn from(value: u32) -> Self {
+        match value {
+            1 => Self::Monochrome,
+            2 => Self::Color,
+            4 => Self::MaskedColor,
+            _ => unreachable!()
+        }
+    }
+}
+
+pub struct CursorImage {
+    pub data: Vec<u8>,
+    pub type_: CursorType,
+    pub width: UINT,
+    pub height: UINT,
+    pub pitch: UINT,
+    pub hot_spot: POINT,
+}
+
+pub struct Cursor {
+    pub position: POINT,
+    pub image: Option<CursorImage>,
+    pub visible: bool
+}
+
 struct DuplicatedOutput {
     device: ComPtr<ID3D11Device>,
     device_context: ComPtr<ID3D11DeviceContext>,
@@ -183,12 +220,40 @@ impl DuplicatedOutput {
         }
     }
 
+    fn capture_cursor_image(
+        &mut self,
+        size: UINT,
+    ) -> Result<(Vec<u8>, DXGI_OUTDUPL_POINTER_SHAPE_INFO), HRESULT> {
+        unsafe {
+            let mut required_size = 0;
+            let mut shape_info = zeroed();
+            let mut buffer = vec![0u8; size as usize];
+
+            let hr = self.output_duplication.GetFramePointerShape(
+                size,
+                buffer.as_mut_ptr() as *mut c_void,
+                &mut required_size,
+                &mut shape_info,
+            );
+
+            if hr_failed(hr) {
+                return Err(hr);
+            }
+
+            Ok((buffer, shape_info))
+        }
+    }
+
     fn capture_frame_to_surface(
         &mut self,
         timeout_ms: u32,
-    ) -> Result<ComPtr<IDXGISurface1>, HRESULT> {
-        let safe_timeout_ms = match timeout_ms {0 => 1000, _ => timeout_ms};
-        let frame_resource = unsafe {
+        capture_cursor: bool,
+    ) -> Result<(ComPtr<IDXGISurface1>, Option<Cursor>), HRESULT> {
+        let safe_timeout_ms = match timeout_ms {
+            0 => 1000,
+            _ => timeout_ms,
+        };
+        let (frame_resource, frame_info) = unsafe {
             let mut frame_resource = ptr::null_mut();
             let mut frame_info = zeroed();
             let mut hr = self.output_duplication.AcquireNextFrame(
@@ -209,8 +274,39 @@ impl DuplicatedOutput {
             if hr_failed(hr) {
                 return Err(hr);
             }
-            ComPtr::from_raw(frame_resource)
+            (ComPtr::from_raw(frame_resource), frame_info)
         };
+
+        // Position information is only accurate when visible is true, otherwise it returns 0,0 position
+        //
+        // This is part of capture_frame_to_surface because DXGI only allows you to capture the cursor if you "own" the current frame.
+        // I tried doing this later in the chain but DXGI returns INVALID_ACCESS
+        let cursor = if capture_cursor {
+            let mut cursor = Cursor {
+                position: frame_info.PointerPosition.Position,
+                image: None,
+                visible: frame_info.PointerPosition.Visible > 0
+            };
+
+            // if frame_info.PointerShapeBufferSize == 0 then DXGI does not return any image data and is only greater than 0 if the cursor has changed since last frame
+            if frame_info.PointerShapeBufferSize > 0 {
+                let (buffer, shape) =
+                    self.capture_cursor_image(frame_info.PointerShapeBufferSize)?;
+                cursor.image = Some(CursorImage {
+                    data: buffer,
+                    type_: CursorType::from(shape.Type),
+                    width: shape.Width,
+                    height: shape.Height,
+                    pitch: shape.Pitch,
+                    hot_spot: shape.HotSpot,
+                });
+            }
+
+            Some(cursor)
+        } else {
+            None
+        };
+
         let frame_texture = frame_resource.cast::<ID3D11Texture2D>().unwrap();
         let mut texture_desc = unsafe {
             let mut texture_desc = zeroed();
@@ -243,7 +339,7 @@ impl DuplicatedOutput {
             );
             self.output_duplication.ReleaseFrame();
         }
-        readable_surface.cast()
+        Ok((readable_surface.cast()?, cursor))
     }
 }
 
@@ -268,7 +364,10 @@ impl<'a> BorrowedFrame<'a> {
     }
     pub fn as_bytes(&'a self) -> &'a [u8] {
         unsafe {
-            ::core::slice::from_raw_parts((self.data as *const [BGRA8]) as *const u8, self.width * 4 * self.height)
+            ::core::slice::from_raw_parts(
+                (self.data as *const [BGRA8]) as *const u8,
+                self.width * 4 * self.height,
+            )
         }
     }
 }
@@ -368,7 +467,10 @@ impl DXGIManager {
         Err("No output could be acquired")
     }
 
-    fn capture_frame_to_surface(&mut self) -> Result<ComPtr<IDXGISurface1>, CaptureError> {
+    fn capture_frame_to_surface(
+        &mut self,
+        capture_cursor: bool,
+    ) -> Result<(ComPtr<IDXGISurface1>, Option<Cursor>), CaptureError> {
         if self.duplicated_output.is_none() {
             if self.acquire_output_duplication().is_ok() {
                 return Err(CaptureError::Fail("No valid duplicated output"));
@@ -381,9 +483,9 @@ impl DXGIManager {
             .duplicated_output
             .as_mut()
             .unwrap()
-            .capture_frame_to_surface(timeout_ms)
+            .capture_frame_to_surface(timeout_ms, capture_cursor)
         {
-            Ok(surface) => Ok(surface),
+            Ok((surface, cursor)) => Ok((surface, cursor)),
             Err(DXGI_ERROR_ACCESS_LOST) => {
                 if self.acquire_output_duplication().is_ok() {
                     Err(CaptureError::AccessLost)
@@ -391,7 +493,11 @@ impl DXGIManager {
                     Err(CaptureError::RefreshFailure)
                 }
             }
+            Err(DXGI_ERROR_MORE_DATA) => Err(CaptureError::Fail(
+                "Could not create cursor buffer large enough",
+            )),
             Err(E_ACCESSDENIED) => Err(CaptureError::AccessDenied),
+            Err(DXGI_ERROR_INVALID_CALL) => Err(CaptureError::AccessDenied),
             Err(DXGI_ERROR_WAIT_TIMEOUT) => Err(CaptureError::Timeout),
             Err(_) => {
                 if self.acquire_output_duplication().is_ok() {
@@ -403,8 +509,11 @@ impl DXGIManager {
         }
     }
 
-    fn borrow_frame_cpu_t<'a>(&'a mut self) -> Result<BorrowedFrame<'a>, CaptureError> {
-        let frame_surface = match self.capture_frame_to_surface() {
+    fn borrow_frame_cpu_t<'a>(
+        &'a mut self,
+        capture_cursor: bool,
+    ) -> Result<(BorrowedFrame<'a>, Option<Cursor>), CaptureError> {
+        let (frame_surface, cursor) = match self.capture_frame_to_surface(capture_cursor) {
             Ok(surface) => surface,
             Err(e) => return Err(e),
         };
@@ -445,13 +554,14 @@ impl DXGIManager {
             },
         };
 
-        Ok(frame)
+        Ok((frame, cursor))
     }
 
     fn capture_frame_t<T: Copy + Send + Sync + Sized>(
         &mut self,
-    ) -> Result<(Vec<T>, (usize, usize)), CaptureError> {
-        let frame_surface = match self.capture_frame_to_surface() {
+        capture_cursor: bool,
+    ) -> Result<(Vec<T>, (usize, usize), Option<Cursor>), CaptureError> {
+        let (frame_surface, cursor) = match self.capture_frame_to_surface(capture_cursor) {
             Ok(surface) => surface,
             Err(e) => return Err(e),
         };
@@ -591,50 +701,63 @@ impl DXGIManager {
         //     output_width * output_height * (mem::size_of::<BGRA8>() / mem::size_of::<T>())
         // );
         unsafe { frame_surface.Unmap() };
-        Ok((pixel_buf, (output_width, output_height)))
+        Ok((pixel_buf, (output_width, output_height), cursor))
     }
 
     /// Capture a frame
     ///
     /// On success, return Vec with pixels and width and height of frame.
     /// On failure, return CaptureError.
-    pub fn capture_frame(&mut self) -> Result<(Vec<BGRA8>, (usize, usize)), CaptureError> {
-        self.capture_frame_t()
+    pub fn capture_frame(
+        &mut self,
+        capture_cursor: bool,
+    ) -> Result<(Vec<BGRA8>, (usize, usize), Option<Cursor>), CaptureError> {
+        self.capture_frame_t(capture_cursor)
     }
 
     /// Capture a frame
     ///
     /// On success, return Vec with pixel components and width and height of frame.
     /// On failure, return CaptureError.
-    pub fn capture_frame_components(&mut self) -> Result<(Vec<u8>, (usize, usize)), CaptureError> {
-        self.capture_frame_t()
+    pub fn capture_frame_components(
+        &mut self,
+        capture_cursor: bool,
+    ) -> Result<(Vec<u8>, (usize, usize), Option<Cursor>), CaptureError> {
+        self.capture_frame_t(capture_cursor)
     }
 
     // TODO: replace with gpu implementation
-    pub fn capture_frame_rgba(&mut self) -> Result<(Vec<RGBA8>, (usize, usize)), CaptureError> {
-        let (mut frame, size) = self.capture_frame()?;
+    pub fn capture_frame_rgba(
+        &mut self,
+        capture_cursor: bool,
+    ) -> Result<(Vec<RGBA8>, (usize, usize), Option<Cursor>), CaptureError> {
+        let (mut frame, size, cursor) = self.capture_frame(capture_cursor)?;
         frame.par_iter_mut().for_each(|px| {
             ::std::mem::swap(&mut px.b, &mut px.r);
         });
         let frame = unsafe { ::std::mem::transmute(frame) };
-        Ok((frame, size))
+        Ok((frame, size, cursor))
     }
 
     /// Borrow a frame without allocations
-    pub fn borrow_frame(&mut self) -> Result<BorrowedFrame, CaptureError> {
-        self.borrow_frame_cpu_t()
+    pub fn borrow_frame(
+        &mut self,
+        capture_cursor: bool,
+    ) -> Result<(BorrowedFrame, Option<Cursor>), CaptureError> {
+        self.borrow_frame_cpu_t(capture_cursor)
     }
 
     // TODO: replace with gpu implementation
     pub fn capture_frame_rgba_components(
         &mut self,
-    ) -> Result<(Vec<u8>, (usize, usize)), CaptureError> {
-        let (mut frame, size) = self.capture_frame_components()?;
+        capture_cursor: bool,
+    ) -> Result<(Vec<u8>, (usize, usize), Option<Cursor>), CaptureError> {
+        let (mut frame, size, cursor) = self.capture_frame_components(capture_cursor)?;
 
         frame.par_chunks_exact_mut(4).for_each(|px| {
             px.swap(0, 2);
         });
-        Ok((frame, size))
+        Ok((frame, size, cursor))
     }
 }
 
@@ -649,8 +772,8 @@ mod dxgcap_tests {
     fn cap_100_frames() {
         let mut manager = DXGIManager::new(300).unwrap();
         for _ in 0..10 {
-            match manager.capture_frame() {
-                Ok((pixels, (_, _))) => {
+            match manager.capture_frame(false) {
+                Ok((pixels, (_, _), _)) => {
                     let len = pixels.len() as u64;
                     let (r, g, b) = pixels.into_iter().fold((0u64, 0u64, 0u64), |(r, g, b), p| {
                         (r + p.r as u64, g + p.g as u64, b + p.b as u64)
@@ -667,8 +790,8 @@ mod dxgcap_tests {
     #[serial]
     fn compare_frame_dims() {
         let mut manager = DXGIManager::new(300).unwrap();
-        let (frame, (fw, fh)) = manager.capture_frame().unwrap();
-        let (frame_u8, (fu8w, fu8h)) = manager.capture_frame_components().unwrap();
+        let (frame, (fw, fh), _) = manager.capture_frame(false).unwrap();
+        let (frame_u8, (fu8w, fu8h), _) = manager.capture_frame_components(false).unwrap();
         assert_eq!(fw, fu8w);
         assert_eq!(fh, fu8h);
         assert_eq!(4 * frame.len(), frame_u8.len());
