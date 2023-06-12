@@ -185,7 +185,7 @@ impl From<u32> for CursorType {
             1 => Self::Monochrome,
             2 => Self::Color,
             4 => Self::MaskedColor,
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 }
@@ -202,7 +202,7 @@ pub struct CursorImage {
 pub struct Cursor {
     pub position: POINT,
     pub image: Option<CursorImage>,
-    pub visible: bool
+    pub visible: bool,
 }
 
 struct DuplicatedOutput {
@@ -246,30 +246,24 @@ impl DuplicatedOutput {
 
     fn capture_frame_to_surface(
         &mut self,
-        timeout_ms: u32,
+        mut timeout_ms: u32,
         capture_cursor: bool,
     ) -> Result<(ComPtr<IDXGISurface1>, Option<Cursor>), HRESULT> {
-        let safe_timeout_ms = match timeout_ms {
-            0 => 1000,
-            _ => timeout_ms,
-        };
         let (frame_resource, frame_info) = unsafe {
             let mut frame_resource = ptr::null_mut();
             let mut frame_info = zeroed();
-            let mut hr = self.output_duplication.AcquireNextFrame(
-                safe_timeout_ms,
+
+            // Wait for a vsync event if timeout is 0
+            if timeout_ms == 0 {
+                self.output.WaitForVBlank();
+                timeout_ms = 1000;
+            }
+
+            let hr = self.output_duplication.AcquireNextFrame(
+                timeout_ms,
                 &mut frame_info,
                 &mut frame_resource,
             );
-
-            // Allows infinite blocking if timeout is 0
-            while hr == DXGI_ERROR_WAIT_TIMEOUT && timeout_ms == 0 {
-                hr = self.output_duplication.AcquireNextFrame(
-                    safe_timeout_ms,
-                    &mut frame_info,
-                    &mut frame_resource,
-                );
-            }
 
             if hr_failed(hr) {
                 return Err(hr);
@@ -285,13 +279,14 @@ impl DuplicatedOutput {
             let mut cursor = Cursor {
                 position: frame_info.PointerPosition.Position,
                 image: None,
-                visible: frame_info.PointerPosition.Visible > 0
+                visible: frame_info.PointerPosition.Visible > 0,
             };
 
             // if frame_info.PointerShapeBufferSize == 0 then DXGI does not return any image data and is only greater than 0 if the cursor has changed since last frame
             if frame_info.PointerShapeBufferSize > 0 {
                 let (buffer, shape) =
                     self.capture_cursor_image(frame_info.PointerShapeBufferSize)?;
+
                 cursor.image = Some(CursorImage {
                     data: buffer,
                     type_: CursorType::from(shape.Type),
@@ -343,22 +338,32 @@ impl DuplicatedOutput {
     }
 }
 
-pub struct BorrowedFrame<'a> {
-    surface: ComPtr<IDXGISurface1>,
+pub struct BorrowedFrame<'a, 'b> {
+    duplicated_output: &'a DuplicatedOutput,
+    surface: Option<ComPtr<IDXGISurface1>>,
     pub width: usize,
     pub height: usize,
-    data: &'a [BGRA8],
+    data: &'b [BGRA8],
 }
 
-impl<'a> Drop for BorrowedFrame<'a> {
+#[cfg(feature = "unsafe-send")]
+unsafe impl Send for BorrowedFrame<'_, '_> {}
+
+impl Drop for BorrowedFrame<'_, '_> {
     fn drop(&mut self) {
         unsafe {
-            self.surface.Unmap();
+            if let Some(surface) = &mut self.surface {
+                surface.Unmap();
+            } else {
+                self.duplicated_output
+                    .output_duplication
+                    .UnMapDesktopSurface();
+            }
         }
     }
 }
 
-impl<'a> BorrowedFrame<'a> {
+impl<'a> BorrowedFrame<'a, '_> {
     pub fn data(&'a self) -> &'a [BGRA8] {
         self.data
     }
@@ -379,6 +384,9 @@ pub struct DXGIManager {
     timeout_ms: u32,
 }
 
+#[cfg(feature = "unsafe-send")]
+unsafe impl Send for DXGIManager {}
+
 struct SharedPtr<T>(*const T);
 
 unsafe impl<T> Send for SharedPtr<T> {}
@@ -387,7 +395,7 @@ unsafe impl<T> Sync for SharedPtr<T> {}
 
 impl DXGIManager {
     /// Construct a new manager with capture timeout.
-    /// If `timeout_ms` is set to 0, capture will block indefinitely until a new frame is acquired.
+    /// If `timeout_ms` is set to 0, capture will wait until a vsync event.
     pub fn new(timeout_ms: u32) -> Result<DXGIManager, &'static str> {
         let mut manager = DXGIManager {
             duplicated_output: None,
@@ -412,6 +420,12 @@ impl DXGIManager {
         ((right - left) as usize, (bottom - top) as usize)
     }
 
+    pub fn wait_for_vblank(&self) {
+        unsafe {
+            self.duplicated_output.as_ref().unwrap().output.WaitForVBlank();
+        }
+    }
+
     /// Set index of capture source to capture from
     pub fn set_capture_source_index(&mut self, cs: usize) {
         self.capture_source_index = cs;
@@ -423,7 +437,7 @@ impl DXGIManager {
     }
 
     /// Set timeout to use when capturing
-    /// If `timeout_ms` is set to 0, capture will block indefinitely until a new frame is acquired.
+    /// If `timeout_ms` is set to 0, capture will wait until a vsync event.
     pub fn set_timeout_ms(&mut self, timeout_ms: u32) {
         self.timeout_ms = timeout_ms
     }
@@ -512,19 +526,45 @@ impl DXGIManager {
     fn borrow_frame_cpu_t<'a>(
         &'a mut self,
         capture_cursor: bool,
-    ) -> Result<(BorrowedFrame<'a>, Option<Cursor>), CaptureError> {
-        let (frame_surface, cursor) = match self.capture_frame_to_surface(capture_cursor) {
-            Ok(surface) => surface,
-            Err(e) => return Err(e),
+    ) -> Result<(BorrowedFrame<'a, '_>, Option<Cursor>), CaptureError> {
+        // This is an optimization that allows us to read the output from system memory if it's already there
+        let mapped_surface = unsafe {
+            let mut locked_rect = zeroed();
+            let hr = self
+                .duplicated_output
+                .as_mut()
+                .unwrap()
+                .output_duplication
+                .MapDesktopSurface(&mut locked_rect);
+
+            // DXGI_ERROR_UNSUPPORTED means not in system memory
+            match hr {
+                DXGI_ERROR_UNSUPPORTED => None,
+                _ if hr_failed(hr) => {
+                    return Err(CaptureError::Fail("Failed to map surface"));
+                }
+                _ => Some(locked_rect),
+            }
         };
 
-        let mapped_surface = unsafe {
-            let mut mapped_surface = zeroed();
-            if hr_failed(frame_surface.Map(&mut mapped_surface, DXGI_MAP_READ)) {
-                frame_surface.Release();
-                return Err(CaptureError::Fail("Failed to map surface"));
+        let (frame_surface, mapped_surface, cursor) = match mapped_surface {
+            Some(surface) => (None, surface, None),
+            None => {
+                let (frame_surface, cursor) = match self.capture_frame_to_surface(capture_cursor) {
+                    Ok(surface) => surface,
+                    Err(e) => return Err(e),
+                };
+
+                unsafe {
+                    let mut mapped_surface = zeroed();
+                    let hr = frame_surface.Map(&mut mapped_surface, DXGI_MAP_READ);
+                    if hr_failed(hr) {
+                        frame_surface.Release();
+                        return Err(CaptureError::Fail("Failed to map surface"));
+                    }
+                    (Some(frame_surface), mapped_surface, cursor)
+                }
             }
-            mapped_surface
         };
 
         let output_desc = self.duplicated_output.as_mut().unwrap().get_desc();
@@ -546,6 +586,7 @@ impl DXGIManager {
         let stride = mapped_surface.Pitch as usize / mem::size_of::<BGRA8>();
 
         let frame = BorrowedFrame {
+            duplicated_output: self.duplicated_output.as_ref().unwrap(),
             surface: frame_surface,
             width: output_width,
             height: output_height,
@@ -565,7 +606,7 @@ impl DXGIManager {
             Ok(surface) => surface,
             Err(e) => return Err(e),
         };
-        // println!("{}", frame_surface.)
+
         let mapped_surface = unsafe {
             let mut mapped_surface = zeroed();
             if hr_failed(frame_surface.Map(&mut mapped_surface, DXGI_MAP_READ)) {
