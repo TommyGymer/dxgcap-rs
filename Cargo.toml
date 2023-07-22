@@ -10,6 +10,10 @@ keywords = ["Windows", "DXGI", "screen", "record", "capture"]
 license = "AGPL-3.0"
 edition = "2018"
 
+[features]
+default = []
+unsafe-send = []
+
 [dependencies]
 winapi = { version = "0.3.9", features = ["d3d11", "d3dcommon", "dxgi", "dxgi1_2", "dxgitype", "ntdef", "unknwnbase", "windef", "winerror", "winuser"] }
 wio = "0.2.2"
