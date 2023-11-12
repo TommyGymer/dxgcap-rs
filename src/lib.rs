@@ -423,8 +423,8 @@ impl DXGIManager {
                             let stop = src.add(output_width);
                             // src = src.add(output_width);
                             while src != stop {
-                                src = src.add(1);
                                 dst.write(*src);
+                                src = src.add(1);
                                 dst = dst.add(1);
                             }
                         },
